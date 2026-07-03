@@ -4,7 +4,7 @@ import {
   type BaseItemDto,
   type MediaSourceInfo,
 } from '@jellyfin/sdk/lib/generated-client/models';
-import { Directory, File, Paths, type DownloadTask } from 'expo-file-system';
+import { Directory, File, Paths } from 'expo-file-system';
 
 import { episodeCode } from '@/lib/format';
 import { useDownloads } from '@/stores/downloads';
@@ -16,7 +16,7 @@ const downloadsDir = new Directory(Paths.document, 'downloads');
 
 let currentApi: Api | null = null;
 let activeCount = 0;
-const activeTasks = new Map<string, DownloadTask>();
+const activeControllers = new Map<string, AbortController>();
 
 function refreshStore(): void {
   useDownloads.getState().setRows(ddb.listDownloads());
@@ -113,7 +113,7 @@ function pump(): void {
   while (activeCount < max) {
     const next = ddb
       .listDownloads()
-      .find((r) => r.status === 'queued' && !activeTasks.has(r.itemId));
+      .find((r) => r.status === 'queued' && !activeControllers.has(r.itemId));
     if (!next) return;
     activeCount++;
     void runOne(next).finally(() => {
@@ -126,11 +126,18 @@ function pump(): void {
 async function runOne(row: ddb.DownloadRow): Promise<void> {
   ddb.setStatus(row.itemId, 'downloading');
   refreshStore();
+  const controller = new AbortController();
+  activeControllers.set(row.itemId, controller);
   try {
+    // iOS can reclaim the document dir; make sure our folder exists every time.
+    if (!downloadsDir.exists) downloadsDir.create({ intermediates: true, idempotent: true });
     const dest = new File(downloadsDir, `${row.itemId}.${row.ext}`);
-    if (dest.exists) dest.delete();
     let lastPercent = -2;
-    const task = File.createDownloadTask(row.url, dest, {
+    // idempotent overwrites any leftover/partial file instead of rejecting with
+    // "cannot create file" (DestinationAlreadyExists) when the download finalizes.
+    const file = await File.downloadFileAsync(row.url, dest, {
+      idempotent: true,
+      signal: controller.signal,
       onProgress: ({ bytesWritten, totalBytes }) => {
         const progress = totalBytes > 0 ? bytesWritten / totalBytes : -1;
         const percent = progress >= 0 ? Math.floor(progress * 100) : -1;
@@ -141,32 +148,32 @@ async function runOne(row: ddb.DownloadRow): Promise<void> {
         }
       },
     });
-    activeTasks.set(row.itemId, task);
-    const file = await task.downloadAsync();
-    if (!file) throw new Error('Download paused unexpectedly');
     ddb.markDone(row.itemId, file.uri, file.size);
   } catch (e) {
     ddb.setStatus(row.itemId, 'failed', e instanceof Error ? e.message : String(e));
   } finally {
-    activeTasks.delete(row.itemId);
+    activeControllers.delete(row.itemId);
     refreshStore();
   }
 }
 
 /** Cancel an active/queued download, or delete a finished one, file included. */
 export function removeDownload(itemId: string): void {
-  const task = activeTasks.get(itemId);
-  if (task) {
+  const controller = activeControllers.get(itemId);
+  if (controller) {
     try {
-      task.cancel();
+      controller.abort();
     } catch {
       // Already finished or cancelled.
     }
   }
   const row = ddb.getDownload(itemId);
-  if (row?.fileUri) {
+  // Delete the finished file, and any partial left behind by an aborted download.
+  const candidates = [row?.fileUri, row ? `${downloadsDir.uri}/${row.itemId}.${row.ext}` : null];
+  for (const uri of candidates) {
+    if (!uri) continue;
     try {
-      const file = new File(row.fileUri);
+      const file = new File(uri);
       if (file.exists) file.delete();
     } catch {
       // File already gone.
