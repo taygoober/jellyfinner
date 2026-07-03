@@ -12,6 +12,9 @@ export type DownloadRow = {
   seriesId: string | null;
   seriesName: string | null;
   seasonId: string | null;
+  /** Filename relative to the downloads folder — the durable identity of the file. */
+  relPath: string | null;
+  /** Legacy absolute URI. No longer read: the container UUID changes across reinstalls. */
   fileUri: string | null;
   status: DownloadStatus;
   /** 0..1, or -1 when the total size is unknown (transcoded downloads). */
@@ -33,6 +36,7 @@ export function initDownloadsDb(): void {
       seriesId TEXT,
       seriesName TEXT,
       seasonId TEXT,
+      relPath TEXT,
       fileUri TEXT,
       status TEXT NOT NULL DEFAULT 'queued',
       progress REAL NOT NULL DEFAULT 0,
@@ -41,6 +45,14 @@ export function initDownloadsDb(): void {
       createdAt INTEGER NOT NULL
     );
   `);
+  // Upgrade path: tables created before relPath existed. Add the column, then
+  // backfill it from the old itemId-based filename so existing downloads keep
+  // resolving after the app updates and the container UUID changes.
+  const cols = db.getAllSync<{ name: string }>('PRAGMA table_info(downloads)');
+  if (!cols.some((c) => c.name === 'relPath')) {
+    db.execSync('ALTER TABLE downloads ADD COLUMN relPath TEXT');
+  }
+  db.runSync(`UPDATE downloads SET relPath = itemId || '.' || ext WHERE relPath IS NULL`);
 }
 
 export function listDownloads(): DownloadRow[] {
@@ -63,13 +75,14 @@ export function insertQueued(
     | 'seriesId'
     | 'seriesName'
     | 'seasonId'
+    | 'relPath'
   >
 ): void {
   db.runSync(
     `INSERT OR REPLACE INTO downloads
       (itemId, mediaSourceId, url, ext, name, episodeCode, seriesId, seriesName, seasonId,
-       fileUri, status, progress, sizeBytes, error, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', 0, NULL, NULL, ?)`,
+       relPath, fileUri, status, progress, sizeBytes, error, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', 0, NULL, NULL, ?)`,
     row.itemId,
     row.mediaSourceId,
     row.url,
@@ -79,6 +92,7 @@ export function insertQueued(
     row.seriesId,
     row.seriesName,
     row.seasonId,
+    row.relPath,
     Date.now()
   );
 }
@@ -96,11 +110,11 @@ export function setProgress(itemId: string, progress: number): void {
   db.runSync('UPDATE downloads SET progress = ? WHERE itemId = ?', progress, itemId);
 }
 
-export function markDone(itemId: string, fileUri: string, sizeBytes: number | null): void {
+export function markDone(itemId: string, sizeBytes: number | null): void {
+  // relPath was fixed at enqueue time; a finished download just flips status/size.
   db.runSync(
-    `UPDATE downloads SET status = 'done', progress = 1, fileUri = ?, sizeBytes = ?, error = NULL
+    `UPDATE downloads SET status = 'done', progress = 1, sizeBytes = ?, error = NULL
      WHERE itemId = ?`,
-    fileUri,
     sizeBytes,
     itemId
   );

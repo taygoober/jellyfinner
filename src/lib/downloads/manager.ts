@@ -22,6 +22,50 @@ function refreshStore(): void {
   useDownloads.getState().setRows(ddb.listDownloads());
 }
 
+/** The file's location right now — always rebuilt from the current container, never stored absolute. */
+function fileFor(row: Pick<ddb.DownloadRow, 'itemId' | 'ext' | 'relPath'>): File {
+  return new File(downloadsDir, row.relPath ?? `${row.itemId}.${row.ext}`);
+}
+
+/** Strip characters that are illegal in filenames (Files app / exFAT) and tidy whitespace. */
+function sanitizeName(s: string): string {
+  return s
+    .replace(/[/\\:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120)
+    .replace(/[. ]+$/, '');
+}
+
+/** A human-readable filename so downloads are recognisable in the Files app. */
+function buildRelPath(entry: {
+  itemId: string;
+  ext: string;
+  name: string;
+  episodeCode: string | null;
+  seriesName: string | null;
+}): string {
+  const base =
+    entry.seriesName && entry.episodeCode
+      ? `${entry.seriesName} - ${entry.episodeCode} - ${entry.name}`
+      : entry.name;
+  const stem = sanitizeName(base) || entry.itemId;
+  const candidate = `${stem}.${entry.ext}`;
+  // Guarantee one file per item: if the readable name is already taken by a
+  // different download, disambiguate rather than clobber it.
+  const taken = new Set(
+    ddb
+      .listDownloads()
+      .filter((r) => r.itemId !== entry.itemId && r.relPath)
+      .map((r) => r.relPath as string)
+  );
+  if (!taken.has(candidate)) return candidate;
+  for (let n = 2; ; n++) {
+    const next = `${stem} (${n}).${entry.ext}`;
+    if (!taken.has(next)) return next;
+  }
+}
+
 /** Call once on startup (and again after login) before using any other export. */
 export function initDownloads(api: Api): void {
   currentApi = api;
@@ -44,8 +88,7 @@ export function initDownloads(api: Api): void {
 function reconcile(): void {
   for (const row of ddb.listDownloads()) {
     if (row.status === 'done') {
-      const exists = row.fileUri ? new File(row.fileUri).exists : false;
-      if (!exists) ddb.removeDownload(row.itemId);
+      if (!fileFor(row).exists) ddb.removeDownload(row.itemId);
     }
   }
 }
@@ -91,16 +134,20 @@ export function enqueueDownloads(api: Api, entries: EnqueueEntry[]): void {
     const ms = mediaSource ?? item.MediaSources?.[0];
     if (!ms) continue;
     const { url, ext } = buildDownloadUrl(api, item.Id, ms);
+    const name = item.Name ?? 'Unknown';
+    const epCode = item.Type === BaseItemKind.Episode ? episodeCode(item) : null;
+    const seriesName = item.SeriesName ?? null;
     ddb.insertQueued({
       itemId: item.Id,
       mediaSourceId: ms.Id ?? item.Id,
       url,
       ext,
-      name: item.Name ?? 'Unknown',
-      episodeCode: item.Type === BaseItemKind.Episode ? episodeCode(item) : null,
+      name,
+      episodeCode: epCode,
       seriesId: item.SeriesId ?? null,
-      seriesName: item.SeriesName ?? null,
+      seriesName,
       seasonId: item.SeasonId ?? null,
+      relPath: buildRelPath({ itemId: item.Id, ext, name, episodeCode: epCode, seriesName }),
     });
   }
   refreshStore();
@@ -131,7 +178,7 @@ async function runOne(row: ddb.DownloadRow): Promise<void> {
   try {
     // iOS can reclaim the document dir; make sure our folder exists every time.
     if (!downloadsDir.exists) downloadsDir.create({ intermediates: true, idempotent: true });
-    const dest = new File(downloadsDir, `${row.itemId}.${row.ext}`);
+    const dest = fileFor(row);
     let lastPercent = -2;
     // idempotent overwrites any leftover/partial file instead of rejecting with
     // "cannot create file" (DestinationAlreadyExists) when the download finalizes.
@@ -148,7 +195,7 @@ async function runOne(row: ddb.DownloadRow): Promise<void> {
         }
       },
     });
-    ddb.markDone(row.itemId, file.uri, file.size);
+    ddb.markDone(row.itemId, file.size);
   } catch (e) {
     ddb.setStatus(row.itemId, 'failed', e instanceof Error ? e.message : String(e));
   } finally {
@@ -169,11 +216,9 @@ export function removeDownload(itemId: string): void {
   }
   const row = ddb.getDownload(itemId);
   // Delete the finished file, and any partial left behind by an aborted download.
-  const candidates = [row?.fileUri, row ? `${downloadsDir.uri}/${row.itemId}.${row.ext}` : null];
-  for (const uri of candidates) {
-    if (!uri) continue;
+  if (row) {
     try {
-      const file = new File(uri);
+      const file = fileFor(row);
       if (file.exists) file.delete();
     } catch {
       // File already gone.
@@ -189,8 +234,10 @@ export function retryDownload(itemId: string): void {
   pump();
 }
 
-/** Local playable file for an item, when fully downloaded. */
+/** Local playable file for an item, when fully downloaded and still present on disk. */
 export function localFileUri(itemId: string): string | null {
   const row = ddb.getDownload(itemId);
-  return row?.status === 'done' ? row.fileUri : null;
+  if (row?.status !== 'done') return null;
+  const file = fileFor(row);
+  return file.exists ? file.uri : null;
 }
