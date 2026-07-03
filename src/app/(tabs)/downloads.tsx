@@ -3,6 +3,7 @@ import { SymbolView } from 'expo-symbols';
 import { ActivityIndicator, Alert, FlatList, Pressable, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { ProgressBar } from '@/components/progress-bar';
 import type { DownloadRow } from '@/lib/downloads/db';
 import { removeDownload, retryDownload } from '@/lib/downloads/manager';
 import { formatBytes } from '@/lib/format';
@@ -76,35 +77,43 @@ export default function DownloadsScreen() {
                 params: { itemId: row.itemId, local: '1', startTicks: '0' },
               })
             }
-            className="mx-4 mb-3 flex-row items-center gap-3 rounded-xl bg-surface p-4 active:bg-surface-high">
-            <View className="flex-1">
-              <Text numberOfLines={1} className="text-sm font-medium text-white">
-                {row.seriesName ? `${row.seriesName} · ${row.episodeCode ?? ''}` : row.name}
-              </Text>
-              {!!row.seriesName && (
-                <Text numberOfLines={1} className="text-xs text-muted">
-                  {row.name}
+            className="mx-4 mb-3 rounded-xl bg-surface p-4 active:bg-surface-high">
+            <View className="flex-row items-center gap-3">
+              <View className="flex-1">
+                <Text numberOfLines={1} className="text-sm font-medium text-white">
+                  {row.seriesName ? `${row.seriesName} · ${row.episodeCode ?? ''}` : row.name}
                 </Text>
+                {!!row.seriesName && (
+                  <Text numberOfLines={1} className="text-xs text-muted">
+                    {row.name}
+                  </Text>
+                )}
+                <Text
+                  className={`mt-0.5 text-xs ${row.status === 'failed' ? 'text-red-400' : 'text-muted'}`}
+                  numberOfLines={1}>
+                  {statusLine(row)}
+                </Text>
+              </View>
+
+              {row.status === 'downloading' && <ActivityIndicator size="small" color="#8b5cf6" />}
+              {row.status === 'done' && (
+                <SymbolView name="play.circle.fill" size={26} tintColor="#8b5cf6" />
               )}
-              <Text
-                className={`mt-0.5 text-xs ${row.status === 'failed' ? 'text-red-400' : 'text-muted'}`}
-                numberOfLines={1}>
-                {statusLine(row)}
-              </Text>
+              {row.status === 'failed' && (
+                <Pressable onPress={() => retryDownload(row.itemId)} hitSlop={8}>
+                  <SymbolView name="arrow.clockwise.circle" size={24} tintColor="#8b5cf6" />
+                </Pressable>
+              )}
+              <Pressable onPress={() => confirmRemove(row)} hitSlop={8}>
+                <SymbolView name="trash" size={18} tintColor="#71717a" />
+              </Pressable>
             </View>
 
-            {row.status === 'downloading' && <ActivityIndicator size="small" color="#8b5cf6" />}
-            {row.status === 'done' && (
-              <SymbolView name="play.circle.fill" size={26} tintColor="#8b5cf6" />
+            {row.status === 'downloading' && row.progress >= 0 && (
+              <View className="mt-2.5">
+                <ProgressBar value={row.progress} />
+              </View>
             )}
-            {row.status === 'failed' && (
-              <Pressable onPress={() => retryDownload(row.itemId)} hitSlop={8}>
-                <SymbolView name="arrow.clockwise.circle" size={24} tintColor="#8b5cf6" />
-              </Pressable>
-            )}
-            <Pressable onPress={() => confirmRemove(row)} hitSlop={8}>
-              <SymbolView name="trash" size={18} tintColor="#71717a" />
-            </Pressable>
           </Pressable>
         )}
       />
