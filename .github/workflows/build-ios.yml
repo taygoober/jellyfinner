@@ -40,6 +40,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # GitHub's macOS runners ship several Xcode versions side by side; the
+      # one selected by default can lag behind what Expo's SPM-based build
+      # steps (e.g. ExpoModulesJSI) require. Always pick the newest available.
+      - name: Select latest available Xcode
+        run: |
+          LATEST=$(ls -d /Applications/Xcode_*.app | sort -V | tail -n1)
+          echo "Selecting $LATEST"
+          sudo xcode-select -s "$LATEST"
+          xcodebuild -version
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
