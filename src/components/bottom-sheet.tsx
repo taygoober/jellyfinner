@@ -45,16 +45,19 @@ export function SheetRow({
   trailing,
   selected,
   onPress,
+  onLongPress,
 }: {
   title: string;
   subtitle?: string;
   trailing?: ReactNode;
   selected?: boolean;
   onPress: () => void;
+  onLongPress?: () => void;
 }) {
   return (
     <Pressable
       onPress={onPress}
+      onLongPress={onLongPress}
       className={`mb-2 flex-row items-center gap-3 rounded-xl p-3.5 active:bg-surface-high ${
         selected ? 'bg-surface-high' : 'bg-white/5'
       }`}>

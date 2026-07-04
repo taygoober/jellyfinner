@@ -9,6 +9,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { initDownloads } from '@/lib/downloads/manager';
 import { initLocalData } from '@/lib/local-data';
+import { syncPendingSubtitles } from '@/lib/subtitles/custom';
 import { useAuth } from '@/stores/auth';
 
 SplashScreen.preventAutoHideAsync();
@@ -32,7 +33,10 @@ export default function RootLayout() {
   }, [hydrated]);
 
   useEffect(() => {
-    if (api) initDownloads(api);
+    if (!api) return;
+    initDownloads(api);
+    // Drain subtitle uploads queued while offline; failures stay queued.
+    void syncPendingSubtitles(api);
   }, [api]);
 
   if (!hydrated) return null;
