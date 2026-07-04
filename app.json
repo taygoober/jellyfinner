@@ -53,13 +53,7 @@
         }
       ],
       "expo-sqlite",
-      "expo-secure-store",
-      [
-        "expo-screen-orientation",
-        {
-          "initialOrientation": "PORTRAIT_UP"
-        }
-      ]
+      "expo-secure-store"
     ],
     "experiments": {
       "typedRoutes": true,
