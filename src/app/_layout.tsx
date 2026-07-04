@@ -2,7 +2,6 @@ import '@/global.css';
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { DarkTheme, Stack, ThemeProvider } from 'expo-router';
-import * as ScreenOrientation from 'expo-screen-orientation';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
@@ -26,8 +25,6 @@ export default function RootLayout() {
   useEffect(() => {
     initLocalData();
     void useAuth.getState().hydrate();
-    // Browse UI stays upright; the player unlocks landscape for itself.
-    void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
   }, []);
 
   useEffect(() => {
@@ -49,6 +46,10 @@ export default function RootLayout() {
           screenOptions={{
             headerShown: false,
             contentStyle: { backgroundColor: '#0a0a0a' },
+            // Orientation is declared per native screen: react-native-screens'
+            // view controllers own the iOS orientation mask, so app-level locks
+            // (expo-screen-orientation) are ignored inside this stack's modals.
+            orientation: 'portrait_up',
           }}>
           <Stack.Protected guard={!!session}>
             <Stack.Screen name="(tabs)" />
@@ -60,6 +61,8 @@ export default function RootLayout() {
                 presentation: 'fullScreenModal',
                 animation: 'fade',
                 autoHideHomeIndicator: true,
+                // The one screen that rotates: everything but upside-down portrait.
+                orientation: 'default',
               }}
             />
           </Stack.Protected>

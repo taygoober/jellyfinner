@@ -7,7 +7,6 @@
    in-progress drag). Refs are only written in effects and read in handlers. */
 import { useEventListener } from 'expo';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import * as ScreenOrientation from 'expo-screen-orientation';
 import { SymbolView } from 'expo-symbols';
 import { useVideoPlayer, VideoView, type VideoSource } from 'expo-video';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -147,6 +146,9 @@ export default function PlayerScreen() {
   const positionRef = useRef(ticksToSeconds(Number(startTicks ?? '0')));
   const durationRef = useRef(0);
   const lastReportRef = useRef(0);
+  // Once the player is being torn down, ignore its events: unloading the source
+  // can emit a final timeUpdate at 0 that would wipe the saved resume position.
+  const stoppedRef = useRef(false);
   const isLocal = local === '1';
 
   // Subtitles are our own overlay (expo-video can't sideload external tracks),
@@ -220,6 +222,7 @@ export default function PlayerScreen() {
   }, [api, deviceId, itemId, local, mediaSourceId, userId]);
 
   useEventListener(player, 'timeUpdate', ({ currentTime }) => {
+    if (stoppedRef.current) return;
     positionRef.current = currentTime;
     if (!scrubbingRef.current) setPosition(currentTime);
     const d = player.duration;
@@ -288,26 +291,27 @@ export default function PlayerScreen() {
     };
   }, [api, itemId, isLocal]);
 
-  // Video wants landscape. Allow every orientation while the player is open so the
-  // phone can rotate freely, then restore the app's portrait lock on the way out.
-  useEffect(() => {
-    void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.ALL);
-    return () => {
-      void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
-    };
-  }, []);
+  // Silence the player NOW, not when React gets around to unmounting: pause is
+  // instant, replaceAsync(null) unloads the source so the background-audio session
+  // has nothing left to keep alive during the dismiss animation.
+  const stopPlayback = () => {
+    stoppedRef.current = true;
+    try {
+      player.pause();
+      void player.replaceAsync(null).catch(() => {});
+    } catch {
+      // Player already disposed by the hook.
+    }
+  };
+  const closePlayer = () => {
+    stopPlayback();
+    router.back();
+  };
 
-  // Leaving the screen must stop playback. With background audio + PiP enabled the
-  // disposed player can otherwise keep its audio session alive, so reopening stacks
-  // a second player on top of the first. Pausing on unmount guarantees it stops.
+  // Safety net for exits that skip the close button (navigation resets, errors).
   useEffect(() => {
-    return () => {
-      try {
-        player.pause();
-      } catch {
-        // Player already disposed by the hook.
-      }
-    };
+    return () => stopPlayback();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stopPlayback only touches the stable player handle.
   }, [player]);
 
   // Auto-hide the controls a few seconds after the last interaction — but only
@@ -399,7 +403,7 @@ export default function PlayerScreen() {
             style={{ top: insets.top + 8 }}
             className="absolute left-4 right-4 flex-row items-start justify-between">
             <Pressable
-              onPress={() => router.back()}
+              onPress={closePlayer}
               hitSlop={8}
               className="h-9 w-9 items-center justify-center rounded-full bg-black/60 active:bg-black/80">
               <SymbolView name="xmark" size={15} tintColor="#ffffff" />
@@ -518,7 +522,7 @@ export default function PlayerScreen() {
           <SymbolView name="exclamationmark.triangle" size={32} tintColor="#f87171" />
           <Text className="mt-4 text-center text-base text-white">{errorMessage}</Text>
           <Pressable
-            onPress={() => router.back()}
+            onPress={closePlayer}
             className="mt-6 rounded-xl bg-surface px-6 py-3 active:bg-surface-high">
             <Text className="text-base font-medium text-white">Go back</Text>
           </Pressable>
