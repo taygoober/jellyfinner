@@ -2,7 +2,7 @@ import type { Api } from '@jellyfin/sdk';
 import { getSubtitleApi } from '@jellyfin/sdk/lib/utils/api/subtitle-api';
 import { Directory, File, Paths } from 'expo-file-system';
 
-import { parseSubtitles, type SubtitleCue } from './parse';
+import { decodeSubtitleBytes, parseSubtitles, type SubtitleCue } from './parse';
 
 /**
  * User-supplied subtitle files, attached to one specific item. Stored on
@@ -65,7 +65,9 @@ export async function addCustomSubtitle(
   const format = lower.endsWith('.srt') ? 'srt' : lower.endsWith('.vtt') ? 'vtt' : null;
   if (!format) throw new Error('Pick an .srt or .vtt file');
 
-  const content = await new File(picked.uri).text();
+  // Read raw bytes and decode ourselves: iOS's own text decoding refuses to
+  // guess the encoding of Windows-1252 files, which most scene SRTs are.
+  const content = decodeSubtitleBytes(await new File(picked.uri).bytes());
   const cues = parseSubtitles(content);
   if (cues.length === 0) throw new Error('No usable cues found in that file');
 
