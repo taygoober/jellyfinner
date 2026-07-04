@@ -148,6 +148,7 @@ export function enqueueDownloads(api: Api, entries: EnqueueEntry[]): void {
       seriesName,
       seasonId: item.SeasonId ?? null,
       relPath: buildRelPath({ itemId: item.Id, ext, name, episodeCode: epCode, seriesName }),
+      runtimeTicks: item.RunTimeTicks ?? null,
     });
   }
   refreshStore();
@@ -232,6 +233,25 @@ export function retryDownload(itemId: string): void {
   ddb.setStatus(itemId, 'queued');
   refreshStore();
   pump();
+}
+
+/** Persist offline watch position so a downloaded item resumes where it left off. */
+export function saveLocalProgress(
+  itemId: string,
+  positionTicks: number,
+  runtimeTicks: number | null
+): void {
+  ddb.setPlaybackProgress(itemId, positionTicks, runtimeTicks);
+  refreshStore();
+}
+
+/** Resume position for a downloaded item; 0 once it's effectively watched to the end. */
+export function localResumeTicks(itemId: string): number {
+  const row = ddb.getDownload(itemId);
+  if (!row || row.positionTicks <= 0) return 0;
+  const runtime = row.runtimeTicks ?? 0;
+  if (runtime > 0 && row.positionTicks / runtime >= 0.95) return 0;
+  return row.positionTicks;
 }
 
 /** Local playable file for an item, when fully downloaded and still present on disk. */

@@ -3,7 +3,7 @@
     "name": "Jellyfinner",
     "slug": "jellyfinner",
     "version": "0.1.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "jellyfinner",
     "userInterfaceStyle": "dark",
@@ -53,7 +53,13 @@
         }
       ],
       "expo-sqlite",
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-screen-orientation",
+        {
+          "initialOrientation": "PORTRAIT_UP"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
