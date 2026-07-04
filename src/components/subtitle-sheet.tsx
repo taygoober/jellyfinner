@@ -1,12 +1,21 @@
 import type { MediaSourceInfo } from '@jellyfin/sdk/lib/generated-client/models';
 import { BaseItemKind } from '@jellyfin/sdk/lib/generated-client/models';
 import { useQuery } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
-import { ActivityIndicator, ScrollView, Text, View } from 'react-native';
+import * as DocumentPicker from 'expo-document-picker';
+import { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, ScrollView, Text, View } from 'react-native';
 import { SymbolView } from 'expo-symbols';
 
 import { BottomSheet, SheetRow } from '@/components/bottom-sheet';
 import { useItem } from '@/lib/api/queries';
+import {
+  addCustomSubtitle,
+  deleteCustomSubtitle,
+  listCustomSubtitles,
+  loadCustomSubtitle,
+  syncCustomSubtitle,
+  type CustomSubtitle,
+} from '@/lib/subtitles/custom';
 import {
   isSubtitleCached,
   listCachedSubtitles,
@@ -62,12 +71,42 @@ export function SubtitleSheet({
 
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [rev, setRev] = useState(0);
 
   const serverTracks = serverSubtitleTracks(mediaSource);
   const cached = useMemo(
     () => (visible ? listCachedSubtitles(itemId) : []),
     [visible, itemId]
   );
+  const customSubs = useMemo(
+    () => (visible ? listCustomSubtitles(itemId) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- rev invalidates after add/sync/delete
+    [visible, itemId, rev]
+  );
+
+  // Retry pending uploads whenever the sheet opens — this is what drains the
+  // "queued while offline" jobs once the server is reachable again.
+  useEffect(() => {
+    if (!visible) return;
+    const pending = listCustomSubtitles(itemId).filter((s) => !s.synced);
+    if (pending.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      let anySynced = false;
+      for (const meta of pending) {
+        try {
+          await syncCustomSubtitle(api, itemId, meta);
+          anySynced = true;
+        } catch {
+          // Still offline — stays queued.
+        }
+      }
+      if (anySynced && !cancelled) setRev((r) => r + 1);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, itemId, api]);
 
   const searchReady =
     !!item.data && (!isEpisode || !item.data?.SeriesId || series.isFetched);
@@ -121,6 +160,58 @@ export function SubtitleSheet({
       onSelect(await loadSubtitle(itemId, sub), label);
     });
 
+  const pickCustom = (meta: CustomSubtitle) =>
+    run(`custom-${meta.id}`, async () => {
+      onSelect(await loadCustomSubtitle(itemId, meta), meta.label);
+    });
+
+  // Not run(): cancelling the picker must not close the sheet.
+  const addFile = async () => {
+    setBusyKey('custom-add');
+    setError(null);
+    try {
+      const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true });
+      if (res.canceled) return;
+      const asset = res.assets[0];
+      const { meta, cues } = await addCustomSubtitle(itemId, { uri: asset.uri, name: asset.name });
+      // Best-effort immediate upload; if it fails the sheet-open sweep retries.
+      void syncCustomSubtitle(api, itemId, meta).catch(() => {});
+      onSelect(cues, meta.label);
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const uploadCustom = async (meta: CustomSubtitle) => {
+    setBusyKey(`custom-sync-${meta.id}`);
+    setError(null);
+    try {
+      await syncCustomSubtitle(api, itemId, meta);
+      setRev((r) => r + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const confirmDeleteCustom = (meta: CustomSubtitle) => {
+    Alert.alert(meta.label, 'Delete this subtitle file from the device?', [
+      { text: 'Keep', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => {
+          deleteCustomSubtitle(itemId, meta);
+          setRev((r) => r + 1);
+        },
+      },
+    ]);
+  };
+
   return (
     <BottomSheet visible={visible} onClose={onClose} title="Subtitles">
       <ScrollView showsVerticalScrollIndicator={false}>
@@ -158,6 +249,47 @@ export function SubtitleSheet({
             ))}
           </>
         )}
+
+        <SectionTitle>Your files</SectionTitle>
+        {customSubs.map((s) => (
+          <SheetRow
+            key={s.id}
+            title={s.label}
+            subtitle={
+              s.synced
+                ? 'On this device · synced to server'
+                : 'On this device · server upload pending'
+            }
+            selected={activeLabel === s.label}
+            onPress={() => pickCustom(s)}
+            onLongPress={() => confirmDeleteCustom(s)}
+            trailing={
+              busyKey === `custom-${s.id}` || busyKey === `custom-sync-${s.id}` ? (
+                Spinner
+              ) : activeLabel === s.label ? (
+                CheckMark
+              ) : s.synced ? (
+                <SymbolView name="checkmark.icloud" size={16} tintColor="#3f3f46" />
+              ) : (
+                <Pressable onPress={() => uploadCustom(s)} hitSlop={8}>
+                  <SymbolView name="icloud.and.arrow.up" size={16} tintColor="#8b5cf6" />
+                </Pressable>
+              )
+            }
+          />
+        ))}
+        <SheetRow
+          title="Add subtitle file…"
+          subtitle="Pick an .srt or .vtt — saved to this video, works offline"
+          onPress={addFile}
+          trailing={
+            busyKey === 'custom-add' ? (
+              Spinner
+            ) : (
+              <SymbolView name="plus.circle" size={18} tintColor="#8b5cf6" />
+            )
+          }
+        />
 
         {cached.length > 0 && (
           <>
