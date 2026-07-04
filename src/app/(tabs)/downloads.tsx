@@ -5,7 +5,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ProgressBar } from '@/components/progress-bar';
 import type { DownloadRow } from '@/lib/downloads/db';
-import { removeDownload, retryDownload } from '@/lib/downloads/manager';
+import { localResumeTicks, removeDownload, retryDownload } from '@/lib/downloads/manager';
 import { formatBytes } from '@/lib/format';
 import { useDownloads } from '@/stores/downloads';
 
@@ -74,7 +74,11 @@ export default function DownloadsScreen() {
             onPress={() =>
               router.push({
                 pathname: '/player',
-                params: { itemId: row.itemId, local: '1', startTicks: '0' },
+                params: {
+                  itemId: row.itemId,
+                  local: '1',
+                  startTicks: String(localResumeTicks(row.itemId)),
+                },
               })
             }
             className="mx-4 mb-3 rounded-xl bg-surface p-4 active:bg-surface-high">
@@ -112,6 +116,12 @@ export default function DownloadsScreen() {
             {row.status === 'downloading' && row.progress >= 0 && (
               <View className="mt-2.5">
                 <ProgressBar value={row.progress} />
+              </View>
+            )}
+
+            {row.status === 'done' && row.positionTicks > 0 && (row.runtimeTicks ?? 0) > 0 && (
+              <View className="mt-2.5">
+                <ProgressBar value={row.positionTicks / (row.runtimeTicks as number)} />
               </View>
             )}
           </Pressable>

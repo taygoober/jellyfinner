@@ -7,6 +7,7 @@
    in-progress drag). Refs are only written in effects and read in handlers. */
 import { useEventListener } from 'expo';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import { SymbolView } from 'expo-symbols';
 import { useVideoPlayer, VideoView, type VideoSource } from 'expo-video';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -14,7 +15,7 @@ import { ActivityIndicator, PanResponder, Pressable, Text, View } from 'react-na
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { SubtitleSheet } from '@/components/subtitle-sheet';
-import { localFileUri } from '@/lib/downloads/manager';
+import { localFileUri, saveLocalProgress } from '@/lib/downloads/manager';
 import { secondsToTicks, ticksToSeconds } from '@/lib/format';
 import {
   reportPlaybackProgress,
@@ -144,7 +145,9 @@ export default function PlayerScreen() {
   const [resolved, setResolved] = useState<ResolvedPlayback | null>(null);
   const resolvedRef = useRef<ResolvedPlayback | null>(null);
   const positionRef = useRef(ticksToSeconds(Number(startTicks ?? '0')));
+  const durationRef = useRef(0);
   const lastReportRef = useRef(0);
+  const isLocal = local === '1';
 
   // Subtitles are our own overlay (expo-video can't sideload external tracks),
   // which is exactly what makes a user-adjustable sync offset possible.
@@ -220,21 +223,37 @@ export default function PlayerScreen() {
     positionRef.current = currentTime;
     if (!scrubbingRef.current) setPosition(currentTime);
     const d = player.duration;
-    if (Number.isFinite(d) && d > 0) setDuration(d);
-    const current = resolvedRef.current;
-    if (!current) return;
-    const now = Date.now();
-    if (now - lastReportRef.current >= REPORT_INTERVAL_MS) {
-      lastReportRef.current = now;
-      void reportPlaybackProgress(api, {
-        itemId,
-        mediaSourceId: current.mediaSource.Id,
-        playSessionId: current.playSessionId,
-        positionTicks: secondsToTicks(currentTime),
-        playMethod: current.playMethod,
-        isPaused: !player.playing,
-      }).catch(() => {});
+    if (Number.isFinite(d) && d > 0) {
+      setDuration(d);
+      durationRef.current = d;
     }
+    const now = Date.now();
+    const due = now - lastReportRef.current >= REPORT_INTERVAL_MS;
+
+    // Offline: there's no server to report to, so persist the resume point locally.
+    if (isLocal) {
+      if (due) {
+        lastReportRef.current = now;
+        saveLocalProgress(
+          itemId,
+          secondsToTicks(currentTime),
+          durationRef.current > 0 ? secondsToTicks(durationRef.current) : null
+        );
+      }
+      return;
+    }
+
+    const current = resolvedRef.current;
+    if (!current || !due) return;
+    lastReportRef.current = now;
+    void reportPlaybackProgress(api, {
+      itemId,
+      mediaSourceId: current.mediaSource.Id,
+      playSessionId: current.playSessionId,
+      positionTicks: secondsToTicks(currentTime),
+      playMethod: current.playMethod,
+      isPaused: !player.playing,
+    }).catch(() => {});
   });
 
   useEventListener(player, 'playingChange', ({ isPlaying: playing }) => setIsPlaying(playing));
@@ -244,9 +263,18 @@ export default function PlayerScreen() {
     if (status === 'error') setError(playerError?.message ?? 'Playback error');
   });
 
-  // Tell the server we stopped, so Continue Watching stays accurate.
+  // On exit: save the final position. Offline goes to the local registry; online
+  // tells the server we stopped, so Continue Watching stays accurate.
   useEffect(() => {
     return () => {
+      if (isLocal) {
+        saveLocalProgress(
+          itemId,
+          secondsToTicks(positionRef.current),
+          durationRef.current > 0 ? secondsToTicks(durationRef.current) : null
+        );
+        return;
+      }
       const current = resolvedRef.current;
       if (current) {
         void reportPlaybackStopped(api, {
@@ -258,7 +286,29 @@ export default function PlayerScreen() {
         }).catch(() => {});
       }
     };
-  }, [api, itemId]);
+  }, [api, itemId, isLocal]);
+
+  // Video wants landscape. Allow every orientation while the player is open so the
+  // phone can rotate freely, then restore the app's portrait lock on the way out.
+  useEffect(() => {
+    void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.ALL);
+    return () => {
+      void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+    };
+  }, []);
+
+  // Leaving the screen must stop playback. With background audio + PiP enabled the
+  // disposed player can otherwise keep its audio session alive, so reopening stacks
+  // a second player on top of the first. Pausing on unmount guarantees it stops.
+  useEffect(() => {
+    return () => {
+      try {
+        player.pause();
+      } catch {
+        // Player already disposed by the hook.
+      }
+    };
+  }, [player]);
 
   // Auto-hide the controls a few seconds after the last interaction — but only
   // while actually playing and not mid-scrub or mid-menu.

@@ -20,6 +20,10 @@ export type DownloadRow = {
   /** 0..1, or -1 when the total size is unknown (transcoded downloads). */
   progress: number;
   sizeBytes: number | null;
+  /** Offline watch position in ticks; 0 when unwatched. Persisted during local playback. */
+  positionTicks: number;
+  /** Total runtime in ticks, so the downloads list can show a watch-progress bar. */
+  runtimeTicks: number | null;
   error: string | null;
   createdAt: number;
 };
@@ -41,6 +45,8 @@ export function initDownloadsDb(): void {
       status TEXT NOT NULL DEFAULT 'queued',
       progress REAL NOT NULL DEFAULT 0,
       sizeBytes INTEGER,
+      positionTicks INTEGER NOT NULL DEFAULT 0,
+      runtimeTicks INTEGER,
       error TEXT,
       createdAt INTEGER NOT NULL
     );
@@ -49,9 +55,12 @@ export function initDownloadsDb(): void {
   // backfill it from the old itemId-based filename so existing downloads keep
   // resolving after the app updates and the container UUID changes.
   const cols = db.getAllSync<{ name: string }>('PRAGMA table_info(downloads)');
-  if (!cols.some((c) => c.name === 'relPath')) {
-    db.execSync('ALTER TABLE downloads ADD COLUMN relPath TEXT');
+  const has = (name: string) => cols.some((c) => c.name === name);
+  if (!has('relPath')) db.execSync('ALTER TABLE downloads ADD COLUMN relPath TEXT');
+  if (!has('positionTicks')) {
+    db.execSync('ALTER TABLE downloads ADD COLUMN positionTicks INTEGER NOT NULL DEFAULT 0');
   }
+  if (!has('runtimeTicks')) db.execSync('ALTER TABLE downloads ADD COLUMN runtimeTicks INTEGER');
   db.runSync(`UPDATE downloads SET relPath = itemId || '.' || ext WHERE relPath IS NULL`);
 }
 
@@ -76,13 +85,14 @@ export function insertQueued(
     | 'seriesName'
     | 'seasonId'
     | 'relPath'
+    | 'runtimeTicks'
   >
 ): void {
   db.runSync(
     `INSERT OR REPLACE INTO downloads
       (itemId, mediaSourceId, url, ext, name, episodeCode, seriesId, seriesName, seasonId,
-       relPath, fileUri, status, progress, sizeBytes, error, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', 0, NULL, NULL, ?)`,
+       relPath, runtimeTicks, fileUri, status, progress, sizeBytes, positionTicks, error, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'queued', 0, NULL, 0, NULL, ?)`,
     row.itemId,
     row.mediaSourceId,
     row.url,
@@ -93,6 +103,7 @@ export function insertQueued(
     row.seriesName,
     row.seasonId,
     row.relPath,
+    row.runtimeTicks,
     Date.now()
   );
 }
@@ -116,6 +127,21 @@ export function markDone(itemId: string, sizeBytes: number | null): void {
     `UPDATE downloads SET status = 'done', progress = 1, sizeBytes = ?, error = NULL
      WHERE itemId = ?`,
     sizeBytes,
+    itemId
+  );
+}
+
+/** Persist offline watch position. Keeps the best runtime we know (metadata or player). */
+export function setPlaybackProgress(
+  itemId: string,
+  positionTicks: number,
+  runtimeTicks: number | null
+): void {
+  db.runSync(
+    `UPDATE downloads SET positionTicks = ?, runtimeTicks = COALESCE(?, runtimeTicks)
+     WHERE itemId = ?`,
+    positionTicks,
+    runtimeTicks,
     itemId
   );
 }

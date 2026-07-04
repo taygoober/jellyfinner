@@ -2,6 +2,7 @@ import '@/global.css';
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { DarkTheme, Stack, ThemeProvider } from 'expo-router';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
@@ -25,6 +26,8 @@ export default function RootLayout() {
   useEffect(() => {
     initLocalData();
     void useAuth.getState().hydrate();
+    // Browse UI stays upright; the player unlocks landscape for itself.
+    void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
   }, []);
 
   useEffect(() => {
