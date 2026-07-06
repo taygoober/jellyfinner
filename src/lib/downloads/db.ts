@@ -24,6 +24,8 @@ export type DownloadRow = {
   positionTicks: number;
   /** Total runtime in ticks, so the downloads list can show a watch-progress bar. */
   runtimeTicks: number | null;
+  /** 1 when positionTicks was set offline and still needs pushing to the server. */
+  progressDirty: number;
   error: string | null;
   createdAt: number;
 };
@@ -47,6 +49,7 @@ export function initDownloadsDb(): void {
       sizeBytes INTEGER,
       positionTicks INTEGER NOT NULL DEFAULT 0,
       runtimeTicks INTEGER,
+      progressDirty INTEGER NOT NULL DEFAULT 0,
       error TEXT,
       createdAt INTEGER NOT NULL
     );
@@ -61,6 +64,9 @@ export function initDownloadsDb(): void {
     db.execSync('ALTER TABLE downloads ADD COLUMN positionTicks INTEGER NOT NULL DEFAULT 0');
   }
   if (!has('runtimeTicks')) db.execSync('ALTER TABLE downloads ADD COLUMN runtimeTicks INTEGER');
+  if (!has('progressDirty')) {
+    db.execSync('ALTER TABLE downloads ADD COLUMN progressDirty INTEGER NOT NULL DEFAULT 0');
+  }
   db.runSync(`UPDATE downloads SET relPath = itemId || '.' || ext WHERE relPath IS NULL`);
 }
 
@@ -131,19 +137,38 @@ export function markDone(itemId: string, sizeBytes: number | null): void {
   );
 }
 
-/** Persist offline watch position. Keeps the best runtime we know (metadata or player). */
+/**
+ * Persist a watch position for a downloaded item. Keeps the best runtime we
+ * know (metadata or player). `dirty` marks whether this position still owes the
+ * server an update: true when it came from local playback, false when it was
+ * mirrored down from a server report that already has it.
+ */
 export function setPlaybackProgress(
   itemId: string,
   positionTicks: number,
-  runtimeTicks: number | null
+  runtimeTicks: number | null,
+  dirty: boolean
 ): void {
   db.runSync(
-    `UPDATE downloads SET positionTicks = ?, runtimeTicks = COALESCE(?, runtimeTicks)
+    `UPDATE downloads SET positionTicks = ?, runtimeTicks = COALESCE(?, runtimeTicks), progressDirty = ?
      WHERE itemId = ?`,
     positionTicks,
     runtimeTicks,
+    dirty ? 1 : 0,
     itemId
   );
+}
+
+/** Every download whose local position still needs pushing to the server. */
+export function listDirtyProgress(): DownloadRow[] {
+  return db.getAllSync<DownloadRow>(
+    'SELECT * FROM downloads WHERE progressDirty = 1 AND positionTicks > 0'
+  );
+}
+
+/** Mark an item's position as accepted by the server. */
+export function clearProgressDirty(itemId: string): void {
+  db.runSync('UPDATE downloads SET progressDirty = 0 WHERE itemId = ?', itemId);
 }
 
 export function removeDownload(itemId: string): void {

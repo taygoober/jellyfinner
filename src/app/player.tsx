@@ -14,7 +14,12 @@ import { ActivityIndicator, PanResponder, Pressable, Text, View } from 'react-na
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { SubtitleSheet } from '@/components/subtitle-sheet';
-import { localFileUri, saveLocalProgress } from '@/lib/downloads/manager';
+import {
+  localFileUri,
+  mirrorServerProgress,
+  saveLocalProgress,
+  syncLocalProgress,
+} from '@/lib/downloads/manager';
 import { secondsToTicks, ticksToSeconds } from '@/lib/format';
 import {
   reportPlaybackProgress,
@@ -257,6 +262,12 @@ export default function PlayerScreen() {
       playMethod: current.playMethod,
       isPaused: !player.playing,
     }).catch(() => {});
+    // Keep a downloaded copy's resume point in step with this streamed session.
+    mirrorServerProgress(
+      itemId,
+      secondsToTicks(currentTime),
+      durationRef.current > 0 ? secondsToTicks(durationRef.current) : null
+    );
   });
 
   useEventListener(player, 'playingChange', ({ isPlaying: playing }) => setIsPlaying(playing));
@@ -270,12 +281,13 @@ export default function PlayerScreen() {
   // tells the server we stopped, so Continue Watching stays accurate.
   useEffect(() => {
     return () => {
+      const positionTicks = secondsToTicks(positionRef.current);
+      const runtimeTicks = durationRef.current > 0 ? secondsToTicks(durationRef.current) : null;
       if (isLocal) {
-        saveLocalProgress(
-          itemId,
-          secondsToTicks(positionRef.current),
-          durationRef.current > 0 ? secondsToTicks(durationRef.current) : null
-        );
+        saveLocalProgress(itemId, positionTicks, runtimeTicks);
+        // Hand this position to the server too (queued if offline) so Continue
+        // Watching and a later streamed session pick up where the download left off.
+        syncLocalProgress(itemId);
         return;
       }
       const current = resolvedRef.current;
@@ -284,10 +296,11 @@ export default function PlayerScreen() {
           itemId,
           mediaSourceId: current.mediaSource.Id,
           playSessionId: current.playSessionId,
-          positionTicks: secondsToTicks(positionRef.current),
+          positionTicks,
           playMethod: current.playMethod,
         }).catch(() => {});
       }
+      mirrorServerProgress(itemId, positionTicks, runtimeTicks);
     };
   }, [api, itemId, isLocal]);
 

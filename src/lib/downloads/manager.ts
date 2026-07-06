@@ -1,12 +1,14 @@
 import type { Api } from '@jellyfin/sdk';
 import {
   BaseItemKind,
+  PlayMethod,
   type BaseItemDto,
   type MediaSourceInfo,
 } from '@jellyfin/sdk/lib/generated-client/models';
 import { Directory, File, Paths } from 'expo-file-system';
 
 import { episodeCode } from '@/lib/format';
+import { reportPlaybackStopped } from '@/lib/playback';
 import { useDownloads } from '@/stores/downloads';
 import { useSettings } from '@/stores/settings';
 
@@ -75,10 +77,29 @@ export function initDownloads(api: Api): void {
   } catch {
     // Already exists.
   }
+  salvageBackgroundCompletions();
   ddb.resetInterrupted();
   reconcile();
   refreshStore();
   pump();
+  // Push any watch positions saved while offline now that we have a server again.
+  void syncPendingProgress(api);
+}
+
+/**
+ * A background download can finish while the app is suspended, or even after
+ * iOS kills it — the OS moves the completed file into place, but our JS never
+ * saw the promise resolve. On startup, any row still marked 'downloading' whose
+ * file is now on disk is treated as done rather than re-downloaded from scratch.
+ * iOS only moves the file to its final path on success, so its presence there
+ * means the transfer completed.
+ */
+function salvageBackgroundCompletions(): void {
+  for (const row of ddb.listDownloads()) {
+    if (row.status !== 'downloading') continue;
+    const file = fileFor(row);
+    if (file.exists) ddb.markDone(row.itemId, file.size);
+  }
 }
 
 /**
@@ -180,11 +201,20 @@ async function runOne(row: ddb.DownloadRow): Promise<void> {
     // iOS can reclaim the document dir; make sure our folder exists every time.
     if (!downloadsDir.exists) downloadsDir.create({ intermediates: true, idempotent: true });
     const dest = fileFor(row);
+    // createDownloadTask has no `idempotent` flag, and iOS moves the finished
+    // file into place only at the very end — so clear any leftover at the
+    // destination first, or that final move fails with DestinationAlreadyExists.
+    try {
+      if (dest.exists) dest.delete();
+    } catch {
+      // Nothing there to clear.
+    }
     let lastPercent = -2;
-    // idempotent overwrites any leftover/partial file instead of rejecting with
-    // "cannot create file" (DestinationAlreadyExists) when the download finalizes.
-    const file = await File.downloadFileAsync(row.url, dest, {
-      idempotent: true,
+    // A background session keeps the native transfer alive while the app is
+    // suspended (screen locked, or switched to another app). onProgress only
+    // fires while our JS is running; the download itself continues regardless.
+    const task = File.createDownloadTask(row.url, dest, {
+      sessionType: 'background',
       signal: controller.signal,
       onProgress: ({ bytesWritten, totalBytes }) => {
         const progress = totalBytes > 0 ? bytesWritten / totalBytes : -1;
@@ -196,6 +226,9 @@ async function runOne(row: ddb.DownloadRow): Promise<void> {
         }
       },
     });
+    const file = await task.downloadAsync();
+    // null only if the task was paused before finishing; we never pause it.
+    if (!file) return;
     ddb.markDone(row.itemId, file.size);
   } catch (e) {
     ddb.setStatus(row.itemId, 'failed', e instanceof Error ? e.message : String(e));
@@ -235,14 +268,76 @@ export function retryDownload(itemId: string): void {
   pump();
 }
 
-/** Persist offline watch position so a downloaded item resumes where it left off. */
+/**
+ * Persist a downloaded item's watch position during local playback. Marked
+ * "dirty" so the server gets the same position on exit or the next time we're
+ * online — this is what makes downloaded progress show up in Continue Watching
+ * and resume correctly when the same item is later streamed.
+ */
 export function saveLocalProgress(
   itemId: string,
   positionTicks: number,
   runtimeTicks: number | null
 ): void {
-  ddb.setPlaybackProgress(itemId, positionTicks, runtimeTicks);
+  ddb.setPlaybackProgress(itemId, positionTicks, runtimeTicks, true);
   refreshStore();
+}
+
+/**
+ * Mirror a server-side (streamed) position into the matching downloaded row, so
+ * the Downloads tab and offline resume agree with what was just watched online.
+ * No-op when the item isn't downloaded; never marks dirty (the server has it).
+ */
+export function mirrorServerProgress(
+  itemId: string,
+  positionTicks: number,
+  runtimeTicks: number | null
+): void {
+  if (!ddb.getDownload(itemId)) return;
+  ddb.setPlaybackProgress(itemId, positionTicks, runtimeTicks, false);
+  refreshStore();
+}
+
+async function pushProgress(api: Api, row: ddb.DownloadRow): Promise<void> {
+  await reportPlaybackStopped(api, {
+    itemId: row.itemId,
+    mediaSourceId: row.mediaSourceId,
+    positionTicks: row.positionTicks,
+    playMethod: PlayMethod.DirectPlay,
+  });
+  ddb.clearProgressDirty(row.itemId);
+}
+
+/** Push one downloaded item's locally-saved position to the server (best-effort). */
+export function syncLocalProgress(itemId: string): void {
+  if (!currentApi) return;
+  const row = ddb.getDownload(itemId);
+  if (!row || !row.progressDirty) return;
+  const api = currentApi;
+  void pushProgress(api, row)
+    .then(refreshStore)
+    .catch(() => {
+      // Offline or server refused — stays dirty for the next sweep.
+    });
+}
+
+/**
+ * Flush every download whose position was saved offline. Like the subtitle
+ * queue, the dirty rows ARE the job list, so pending updates survive restarts
+ * and drain for free once the server is reachable. Called on startup/login.
+ */
+export async function syncPendingProgress(api: Api): Promise<void> {
+  currentApi = api;
+  let changed = false;
+  for (const row of ddb.listDirtyProgress()) {
+    try {
+      await pushProgress(api, row);
+      changed = true;
+    } catch {
+      // Still offline — stays queued.
+    }
+  }
+  if (changed) refreshStore();
 }
 
 /** Resume position for a downloaded item; 0 once it's effectively watched to the end. */
